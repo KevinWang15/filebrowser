@@ -30,6 +30,16 @@ function formatFileSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+// Helper function to set download headers
+function setDownloadHeaders(res, filename, contentType, fileSize) {
+    res.setHeader('Content-Type', contentType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeEncode(filename)}`);
+    res.setHeader('Accept-Ranges', 'none'); // Explicitly disable range requests
+    if (fileSize) {
+        res.setHeader('Content-Length', fileSize);
+    }
+}
+
 // Handle file stream errors
 function handleFileStream(stream, res) {
     stream.on('error', (error) => {
@@ -56,6 +66,12 @@ async function validateAndStart() {
 
         app.get('*', async (req, res) => {
             try {
+                // Explicitly reject range requests
+                if (req.headers.range) {
+                    res.status(416).send('Range requests are not supported');
+                    return;
+                }
+
                 // Handle download parameter
                 const download = req.query.download === 'true';
 
@@ -84,16 +100,14 @@ async function validateAndStart() {
                     if (stats.isFile()) {
                         // Single file download
                         const filename = path.basename(fullPath);
-                        res.setHeader('Content-Type', mime.lookup(fullPath) || 'application/octet-stream');
-                        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeEncode(filename)}`);
+                        setDownloadHeaders(res, filename, mime.lookup(fullPath), stats.size);
                         const fileStream = fs.createReadStream(fullPath);
                         handleFileStream(fileStream, res);
                         fileStream.pipe(res);
                         return;
                     } else {
                         // Directory download as tar
-                        res.setHeader('Content-Type', 'application/x-tar');
-                        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeEncode(path.basename(fullPath))}.tar`);
+                        setDownloadHeaders(res, `${path.basename(fullPath)}.tar`, 'application/x-tar');
 
                         const pack = tar.pack();
                         const walker = walk.walk(fullPath);
@@ -281,9 +295,10 @@ async function validateAndStart() {
 
                 // If it's a file, trigger download
                 const filename = path.basename(fullPath);
-                res.setHeader('Content-Type', mime.lookup(fullPath) || 'application/octet-stream');
-                res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeEncode(filename)}`);
-                fs.createReadStream(fullPath).pipe(res);
+                setDownloadHeaders(res, filename, mime.lookup(fullPath), stats.size);
+                const fileStream = fs.createReadStream(fullPath);
+                handleFileStream(fileStream, res);
+                fileStream.pipe(res);
 
             } catch (err) {
                 console.error('Request handler error:', err);
