@@ -30,6 +30,21 @@ function formatFileSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+// Handle file stream errors
+function handleFileStream(stream, res) {
+    stream.on('error', (error) => {
+        console.error('File stream error:', error);
+        if (!res.headersSent) {
+            res.status(500).send('Error streaming file');
+        }
+        res.end();
+    });
+
+    res.on('close', () => {
+        stream.destroy();
+    });
+}
+
 // Validate serve path exists before starting server
 async function validateAndStart() {
     try {
@@ -71,7 +86,10 @@ async function validateAndStart() {
                         const filename = path.basename(fullPath);
                         res.setHeader('Content-Type', mime.lookup(fullPath) || 'application/octet-stream');
                         res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeEncode(filename)}`);
-                        return fs.createReadStream(fullPath).pipe(res);
+                        const fileStream = fs.createReadStream(fullPath);
+                        handleFileStream(fileStream, res);
+                        fileStream.pipe(res);
+                        return;
                     } else {
                         // Directory download as tar
                         res.setHeader('Content-Type', 'application/x-tar');
@@ -80,20 +98,54 @@ async function validateAndStart() {
                         const pack = tar.pack();
                         const walker = walk.walk(fullPath);
 
+                        // Handle tar pack errors
+                        pack.on('error', (error) => {
+                            console.error('Tar pack error:', error);
+                            if (!res.headersSent) {
+                                res.status(500).send('Error creating tar archive');
+                            }
+                            res.end();
+                        });
+
+                        // Handle file walker errors
+                        walker.on('errors', (root, stats, next) => {
+                            console.error('Walk error:', stats);
+                            next();
+                        });
+
                         walker.on('file', (root, stats, next) => {
                             const filePath = path.join(root, stats.name);
                             const relativePath = path.relative(fullPath, filePath);
-                            const entry = pack.entry({name: relativePath, size: stats.size});
-                            fs.createReadStream(filePath).pipe(entry).on('finish', next);
+                            const entry = pack.entry({name: relativePath, size: stats.size}, (err) => {
+                                if (err) {
+                                    console.error('Tar entry error:', err);
+                                }
+                                next();
+                            });
+
+                            const fileStream = fs.createReadStream(filePath);
+                            handleFileStream(fileStream, res);
+                            fileStream.pipe(entry);
+
+                            fileStream.on('error', (error) => {
+                                console.error('File read error:', error);
+                                entry.destroy(error);
+                                next();
+                            });
                         });
 
-                        walker.on('end', () => pack.finalize());
-                        pack.pipe(res);
+                        walker.on('end', () => {
+                            pack.finalize();
+                        });
 
+                        // Handle client disconnect
                         req.on('close', () => {
                             pack.destroy();
                             walker.pause();
                         });
+
+                        handleFileStream(pack, res);
+                        pack.pipe(res);
                         return;
                     }
                 }
@@ -187,8 +239,7 @@ async function validateAndStart() {
     <div class="container">
         <div class="header">
             <div class="current-path">
-                ${requestPath || '/'} ${parentPath !== requestPath ?
-                        `<a href="${parentPath}"><i class="fas fa-level-up-alt"></i> Up</a>` : ''}
+                ${requestPath || '/'} ${parentPath !== requestPath ? `<a href="${parentPath}"><i class="fas fa-level-up-alt"></i> Up</a>` : ''}
             </div>
         </div>
         <table>
@@ -235,8 +286,11 @@ async function validateAndStart() {
                 fs.createReadStream(fullPath).pipe(res);
 
             } catch (err) {
-                console.error(err);
-                res.status(500).send('Server error');
+                console.error('Request handler error:', err);
+                if (!res.headersSent) {
+                    res.status(500).send('Server error');
+                }
+                res.end();
             }
         });
 
