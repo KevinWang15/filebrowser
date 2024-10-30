@@ -55,6 +55,95 @@ function handleFileStream(stream, res) {
     });
 }
 
+// Create tar archive stream
+async function createTarArchive(fullPath, res, req) {
+    return new Promise((resolve, reject) => {
+        const pack = tar.pack();
+        const walker = walk.walk(fullPath);
+        let isDestroyed = false;
+
+        // Handle tar pack errors
+        pack.on('error', (error) => {
+            console.error('Tar pack error:', error);
+            if (!res.headersSent) {
+                res.status(500).send('Error creating tar archive');
+            }
+            res.end();
+            reject(error);
+        });
+
+        // Handle file walker errors
+        walker.on('errors', (root, stats, next) => {
+            console.error('Walk error:', stats);
+            next();
+        });
+
+        walker.on('file', async (root, stats, next) => {
+            if (isDestroyed) {
+                next();
+                return;
+            }
+
+            try {
+                const filePath = path.join(root, stats.name);
+                const relativePath = path.relative(fullPath, filePath);
+
+                // Create a promise that resolves when the entry is finished
+                const entryPromise = new Promise((resolveEntry) => {
+                    if (!isDestroyed) {
+                        const entry = pack.entry({ name: relativePath, size: stats.size }, (err) => {
+                            if (err) console.error('Tar entry error:', err);
+                            resolveEntry();
+                        });
+
+                        if (entry) {
+                            const fileStream = fs.createReadStream(filePath);
+                            handleFileStream(fileStream, res);
+
+                            fileStream.on('error', (error) => {
+                                console.error('File read error:', error);
+                                if (entry.destroy) entry.destroy(error);
+                                resolveEntry();
+                            });
+
+                            fileStream.pipe(entry);
+                        } else {
+                            resolveEntry();
+                        }
+                    } else {
+                        resolveEntry();
+                    }
+                });
+
+                await entryPromise;
+                next();
+            } catch (error) {
+                console.error('Error processing file:', error);
+                next();
+            }
+        });
+
+        walker.on('end', () => {
+            if (!isDestroyed) {
+                pack.finalize();
+            }
+        });
+
+        // Handle client disconnect
+        req.on('close', () => {
+            isDestroyed = true;
+            pack.destroy();
+            walker.pause();
+        });
+
+        handleFileStream(pack, res);
+        pack.pipe(res);
+
+        // Resolve the promise when the pack is finished
+        pack.on('end', () => resolve());
+    });
+}
+
 // Validate serve path exists before starting server
 async function validateAndStart() {
     try {
@@ -108,58 +197,7 @@ async function validateAndStart() {
                     } else {
                         // Directory download as tar
                         setDownloadHeaders(res, `${path.basename(fullPath)}.tar`, 'application/x-tar');
-
-                        const pack = tar.pack();
-                        const walker = walk.walk(fullPath);
-
-                        // Handle tar pack errors
-                        pack.on('error', (error) => {
-                            console.error('Tar pack error:', error);
-                            if (!res.headersSent) {
-                                res.status(500).send('Error creating tar archive');
-                            }
-                            res.end();
-                        });
-
-                        // Handle file walker errors
-                        walker.on('errors', (root, stats, next) => {
-                            console.error('Walk error:', stats);
-                            next();
-                        });
-
-                        walker.on('file', (root, stats, next) => {
-                            const filePath = path.join(root, stats.name);
-                            const relativePath = path.relative(fullPath, filePath);
-                            const entry = pack.entry({name: relativePath, size: stats.size}, (err) => {
-                                if (err) {
-                                    console.error('Tar entry error:', err);
-                                }
-                                next();
-                            });
-
-                            const fileStream = fs.createReadStream(filePath);
-                            handleFileStream(fileStream, res);
-                            fileStream.pipe(entry);
-
-                            fileStream.on('error', (error) => {
-                                console.error('File read error:', error);
-                                entry.destroy(error);
-                                next();
-                            });
-                        });
-
-                        walker.on('end', () => {
-                            pack.finalize();
-                        });
-
-                        // Handle client disconnect
-                        req.on('close', () => {
-                            pack.destroy();
-                            walker.pause();
-                        });
-
-                        handleFileStream(pack, res);
-                        pack.pipe(res);
+                        await createTarArchive(fullPath, res, req);
                         return;
                     }
                 }
