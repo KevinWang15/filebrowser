@@ -248,6 +248,18 @@ async function validateAndStart() {
             text-decoration: none;
         }
     </style>
+    <script>
+        document.addEventListener('keydown', function(e) {
+            // Check for Command (Mac) or Control (Windows/Linux) + Up Arrow
+            if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowUp') {
+                e.preventDefault(); // Prevent default browser behavior
+                const upLink = document.querySelector('.header a[href]');
+                if (upLink) {
+                    window.location.href = upLink.getAttribute('href');
+                }
+            }
+        });
+    </script>
 </head>
 <body>
     <div class="container">
